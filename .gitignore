@@ -21,3 +21,4 @@ wandb/
 # Local text logs
 *.log
 first_run_log_simclr.txt
+
