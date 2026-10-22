@@ -1,0 +1,43 @@
+# SimCLR Base Configuration
+# All values here are the defaults used by train.py.
+# Override any of these via CLI flags.
+
+model:
+  proj_hidden_dim: 2048       # 512 → 2048 projection head hidden dim
+  proj_out_dim: 128           # z-space dimension (SimCLR paper: 128)
+  zero_init_residual: true    # Better convergence (He et al.)
+
+loss:
+  temperature: 0.07           # NT-Xent τ (SimCLR paper default)
+
+augmentation:
+  preset: full_aug            # See augmentations.py AUGMENTATION_REGISTRY
+
+training:
+  epochs: 500                 # 500 epochs pre-training
+  batch_size: 512             # Paper uses 4096; 512 is practical for 1 GPU
+  optimizer: adam             # adam ≈ LARS for single-GPU; use sgd for multi-GPU
+  lr: null                    # null → linear scaling: 0.3 * batch_size/256
+  weight_decay: 1.0e-6        # SimCLR uses 1e-6 with LARS
+  warmup_epochs: 10           # Linear warm-up
+
+system:
+  num_workers: 4
+  device: cuda
+  seed: 42
+  amp: true                   # Automatic mixed precision (FP16)
+
+checkpointing:
+  checkpoint_dir: ./checkpoints
+  save_every: 100             # Save every 100 epochs
+
+linear_eval:
+  eval_epochs: 100
+  eval_lr: 0.1
+  skip_eval: false
+
+wandb:
+  project: simclr-cifar10
+  entity: null                # Your W&B username or team
+  offline: false
+

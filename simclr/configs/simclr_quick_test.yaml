@@ -1,0 +1,42 @@
+# SimCLR Quick Test Configuration (smoke test, ~5 min)
+# Used to verify the pipeline works before launching full runs.
+
+model:
+  proj_hidden_dim: 2048
+  proj_out_dim: 128
+  zero_init_residual: true
+
+loss:
+  temperature: 0.07
+
+augmentation:
+  preset: full_aug
+
+training:
+  epochs: 5
+  batch_size: 256
+  optimizer: adam
+  lr: null
+  weight_decay: 1.0e-6
+  warmup_epochs: 2
+
+system:
+  num_workers: 2
+  device: cuda
+  seed: 42
+  amp: true
+
+checkpointing:
+  checkpoint_dir: ./checkpoints_test
+  save_every: 5
+
+linear_eval:
+  eval_epochs: 10
+  eval_lr: 0.1
+  skip_eval: false
+
+wandb:
+  project: simclr-cifar10
+  entity: null
+  offline: true           # Keep offline for smoke tests
+

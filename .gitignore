@@ -1,0 +1,23 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Data and logs
+data/
+logs/
+checkpoints/
+*.pt
+*.pth
+
+# Wandb
+wandb/
+
+# Local text logs
+*.log
+first_run_log_simclr.txt
