@@ -80,6 +80,7 @@ def build_command(aug_preset: str, cfg: dict) -> list[str]:
         f"--data_root={cfg['data_root']}",
         f"--log_dir={cfg['log_dir']}",
         f"--seed={cfg['seed']}",
+        f"--aug_backend={cfg['aug_backend']}",
         f"--run_name={run_name}",
     ]
 
@@ -88,19 +89,24 @@ def build_command(aug_preset: str, cfg: dict) -> list[str]:
 # Runner
 # ---------------------------------------------------------------------------
 
-def run_all(cfg: dict, dry_run: bool = False):
+def run_all(cfg: dict, presets: list[str], dry_run: bool = False):
     print(f"\n{'─'*60}")
-    print(f"SimCLR augmentation ablation — {len(AUG_PRESETS)} runs")
+    print(f"SimCLR augmentation ablation — {len(presets)} runs")
     print(f"Fixed: bs={cfg['batch_size']}, "
           f"ep={cfg['epochs']}, "
           f"τ={cfg['temperature']}, "
           f"seed={cfg['seed']}")
     print(f"{'─'*60}\n")
 
-    for i, preset in enumerate(AUG_PRESETS, 1):
+    for i, preset in enumerate(presets, 1):
         cmd = build_command(preset, cfg)
         run_name = f"simclr_{preset}"
-        print(f"[{i}/{len(AUG_PRESETS)}]  run: {run_name}")
+        print(f"[{i}/{len(presets)}]  run: {run_name}")
+
+        # train.py writes {run_name}_eval.txt only after a run fully finishes
+        if (Path(cfg["log_dir"]) / f"{run_name}_eval.txt").exists():
+            print(f"           skip: already finished ({run_name}_eval.txt exists)\n")
+            continue
         print(f"           cmd: {' '.join(cmd)}\n")
 
         if not dry_run:
@@ -125,6 +131,12 @@ def main():
                    help=f"Linear eval epochs per run (default: {BASE_CONFIG['eval_epochs']})")
     p.add_argument("--data_root", type=str, default=BASE_CONFIG["data_root"])
     p.add_argument("--log_dir", type=str, default=BASE_CONFIG["log_dir"])
+    p.add_argument("--presets", type=str, nargs="+", default=AUG_PRESETS,
+                   choices=AUG_PRESETS,
+                   help="Subset of presets to run (default: all)")
+    p.add_argument("--aug_backend", type=str, default="auto",
+                   choices=["auto", "cpu", "gpu"],
+                   help="cpu = torchvision, gpu = Kornia, auto = by CPU count (default)")
     p.add_argument(
         "--dry_run",
         action="store_true",
@@ -138,11 +150,12 @@ def main():
         "temperature": BASE_CONFIG["temperature"],
         "eval_epochs": args.eval_epochs,
         "seed":        BASE_CONFIG["seed"],
+        "aug_backend": args.aug_backend,
         "data_root":   args.data_root,
         "log_dir":     args.log_dir,
     }
 
-    run_all(cfg, dry_run=args.dry_run)
+    run_all(cfg, args.presets, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -39,6 +40,8 @@ import wandb
 
 from augmentations import (
     build_simclr_transform,
+    build_simclr_transform_gpu,
+    load_cifar10_gpu,
     TwoViewTransform,
     get_augmentation_config,
     AUGMENTATION_REGISTRY,
@@ -68,6 +71,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--aug_preset", type=str, default="full_aug",
         choices=list(AUGMENTATION_REGISTRY.keys()),
+    )
+    p.add_argument(
+        "--aug_backend", type=str, default="auto", choices=["auto", "cpu", "gpu"],
+        help="cpu = torchvision in DataLoader workers; gpu = Kornia on GPU; "
+             f"auto = gpu if fewer than {MIN_CPUS_FOR_CPU_AUG} CPUs",
     )
 
     # ── Training ──────────────────────────────────────────────────────────
@@ -148,6 +156,23 @@ class LARS(optim.Optimizer):
 
 
 # ---------------------------------------------------------------------------
+# Augmentation backend
+# ---------------------------------------------------------------------------
+
+# Below this many CPU cores, DataLoader workers can't keep the GPU fed with
+# per-image PIL augmentations (e.g. Colab's 2 vCPUs), so augment on GPU instead.
+MIN_CPUS_FOR_CPU_AUG = 8
+
+
+def gpu_two_view_batches(data: torch.Tensor, aug, batch_size: int):
+    """Yield ((x1, x2), None) like the DataLoader path, augmenting on GPU."""
+    perm = torch.randperm(data.shape[0], device=data.device)
+    for b in range(data.shape[0] // batch_size):
+        x = data[perm[b * batch_size : (b + 1) * batch_size]].float() / 255.0
+        yield (aug(x), aug(x)), None
+
+
+# ---------------------------------------------------------------------------
 # LR helpers
 # ---------------------------------------------------------------------------
 
@@ -216,6 +241,12 @@ def train(args: argparse.Namespace):
 
     # ── Augmentation config ───────────────────────────────────────────────
     aug_cfg = get_augmentation_config(args.aug_preset)
+    cpu_count = os.cpu_count() or 1
+    if args.aug_backend == "auto":
+        use_gpu_aug = device.type == "cuda" and cpu_count < MIN_CPUS_FOR_CPU_AUG
+    else:
+        use_gpu_aug = args.aug_backend == "gpu"
+    aug_backend = "kornia-gpu" if use_gpu_aug else "torchvision-cpu"
 
     # ── Run name ──────────────────────────────────────────────────────────
     if args.run_name is None:
@@ -276,6 +307,7 @@ def train(args: argparse.Namespace):
     log.info("")
     log.info("  ── Augmentation ───────────────────────────────────────")
     log.info(f"  Preset         : {args.aug_preset}  (tag: {aug_cfg.tag})")
+    log.info(f"  Backend        : {aug_backend}  ({cpu_count} CPUs)")
     log.info(f"  Random crop    : {aug_cfg.use_crop}"
              + (f"  (scale={aug_cfg.crop_scale}, size={aug_cfg.crop_size})" if aug_cfg.use_crop else ""))
     log.info(f"  Horiz flip     : {aug_cfg.use_hflip}")
@@ -312,6 +344,7 @@ def train(args: argparse.Namespace):
             "proj_out_dim":          args.proj_out_dim,
             "temperature":           args.temperature,
             "aug_preset":            args.aug_preset,
+            "aug_backend":           aug_backend,
             "aug_tag":               aug_cfg.tag,
             "use_crop":              aug_cfg.use_crop,
             "crop_scale":            list(aug_cfg.crop_scale),
@@ -332,23 +365,31 @@ def train(args: argparse.Namespace):
         tags=["simclr", aug_cfg.tag],
     )
 
-    # ── Dataset: two independently augmented views per image (CPU workers) ─
+    # ── Dataset: two independently augmented views per image ──────────────
     torch.backends.cudnn.benchmark = True
-    train_set = CIFAR10(
-        args.data_root, train=True, download=True,
-        transform=TwoViewTransform(build_simclr_transform(aug_cfg)),
-    )
-    train_loader = DataLoader(
-        train_set,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=True,
-        persistent_workers=args.num_workers > 0,
-    )
-    num_batches = len(train_loader)
-    log.info(f"Dataset: {len(train_set)} images | {num_batches} batches/epoch (bs={args.batch_size})")
+    if use_gpu_aug:
+        train_data, _ = load_cifar10_gpu(args.data_root, train=True, device=device)
+        gpu_aug = build_simclr_transform_gpu(aug_cfg)
+        num_images = train_data.shape[0]
+        num_batches = num_images // args.batch_size
+    else:
+        train_set = CIFAR10(
+            args.data_root, train=True, download=True,
+            transform=TwoViewTransform(build_simclr_transform(aug_cfg)),
+        )
+        train_loader = DataLoader(
+            train_set,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=args.num_workers,
+            pin_memory=True,
+            drop_last=True,
+            persistent_workers=args.num_workers > 0,
+        )
+        num_images = len(train_set)
+        num_batches = len(train_loader)
+    log.info(f"Dataset: {num_images} images | {num_batches} batches/epoch "
+             f"(bs={args.batch_size}, aug={aug_backend})")
 
     # ── Optimizer + scheduler ─────────────────────────────────────────────
     if args.optimizer == "lars":
@@ -373,7 +414,9 @@ def train(args: argparse.Namespace):
         epoch_loss = 0.0
         t0 = time.time()
 
-        for (x1, x2), _ in train_loader:
+        batches = (gpu_two_view_batches(train_data, gpu_aug, args.batch_size)
+                   if use_gpu_aug else train_loader)
+        for (x1, x2), _ in batches:
             x1 = x1.to(device, non_blocking=True)
             x2 = x2.to(device, non_blocking=True)
 

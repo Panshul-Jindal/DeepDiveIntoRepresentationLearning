@@ -146,6 +146,62 @@ def build_simclr_transform(cfg: AugmentationConfig) -> T.Compose:
 
 
 # ---------------------------------------------------------------------------
+# GPU variant via Kornia (for machines with too few CPU cores to feed the GPU)
+# ---------------------------------------------------------------------------
+
+def build_simclr_transform_gpu(cfg: AugmentationConfig):
+    """
+    Same pipeline as build_simclr_transform, but batched on GPU tensors
+    (B, 3, H, W) in [0, 1]. Kornia samples random parameters independently
+    for every image in the batch.
+    """
+    import kornia.augmentation as K
+    import torch.nn as nn
+
+    s = cfg.color_jitter_strength
+    transforms: List[nn.Module] = []
+
+    # 1. Random resized crop ("resample" = one batched grid_sample; "slice" loops per image)
+    if cfg.use_crop:
+        transforms.append(K.RandomResizedCrop(
+            size=(cfg.crop_size, cfg.crop_size),
+            scale=cfg.crop_scale,
+            cropping_mode="resample",
+        ))
+
+    # 2. Horizontal flip
+    if cfg.use_hflip:
+        transforms.append(K.RandomHorizontalFlip(p=0.5))
+
+    # 3. Color jitter (Brightness, Contrast, Saturation, Hue)
+    if cfg.use_color_jitter:
+        transforms.append(K.ColorJitter(
+            brightness=cfg.jitter_brightness * s,
+            contrast=cfg.jitter_contrast * s,
+            saturation=cfg.jitter_saturation * s,
+            hue=cfg.jitter_hue * s,
+            p=cfg.jitter_prob,
+        ))
+
+    # 4. Random grayscale
+    if cfg.use_grayscale:
+        transforms.append(K.RandomGrayscale(p=cfg.grayscale_prob))
+
+    # 5. Gaussian blur (optional)
+    if cfg.use_blur:
+        transforms.append(K.RandomGaussianBlur(
+            kernel_size=(cfg.blur_kernel_size, cfg.blur_kernel_size),
+            sigma=cfg.blur_sigma,
+            p=0.5,
+        ))
+
+    # 6. Normalize
+    transforms.append(K.Normalize(mean=torch.tensor(cfg.mean), std=torch.tensor(cfg.std)))
+
+    return nn.Sequential(*transforms)
+
+
+# ---------------------------------------------------------------------------
 # Two-view wrapper dataset transform
 # ---------------------------------------------------------------------------
 
