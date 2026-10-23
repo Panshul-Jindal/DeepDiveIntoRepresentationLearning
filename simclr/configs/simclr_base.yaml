@@ -8,15 +8,15 @@ model:
   zero_init_residual: true    # Better convergence (He et al.)
 
 loss:
-  temperature: 0.07           # NT-Xent τ (SimCLR paper default)
+  temperature: 0.5            # NT-Xent τ (SimCLR CIFAR-10 setting)
 
 augmentation:
   preset: full_aug            # See augmentations.py AUGMENTATION_REGISTRY
 
 training:
-  epochs: 500                 # 500 epochs pre-training
+  epochs: 100                 # 100 epochs pre-training
   batch_size: 512             # Paper uses 4096; 512 is practical for 1 GPU
-  optimizer: adam             # adam ≈ LARS for single-GPU; use sgd for multi-GPU
+  optimizer: lars             # LARS as in SimCLR (momentum 0.9, η=0.001)
   lr: null                    # null → linear scaling: 0.3 * batch_size/256
   weight_decay: 1.0e-6        # SimCLR uses 1e-6 with LARS
   warmup_epochs: 10           # Linear warm-up

@@ -2,17 +2,12 @@
 SimCLR augmentation ablation sweep for CIFAR-10.
 
 Runs one experiment per augmentation preset. All other hyperparameters
-(batch size, epochs, temperature) are fixed at the base config.
+(batch size, epochs, temperature, seed) are fixed at the base config.
+Epochs default to 100, matching the paper's augmentation ablations (Sec. 2.3).
 
-Each W&B run name is just:  simclr_{aug_tag}
+Each W&B run name is:  simclr_{aug_tag}
 e.g.  simclr_full_aug
-      simclr_no_color_jitter
-      simclr_no_grayscale
-      simclr_no_hflip
-      simclr_crop_only
-      simclr_weak_crop
-      simclr_weak_color_s05
-      simclr_with_blur
+      simclr_color_only
 
 Usage:
     # Dry-run: print all commands without running
@@ -35,10 +30,11 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 BASE_CONFIG = {
-    "epochs":      500,
+    "epochs":      100,
     "batch_size":  512,
-    "temperature": 0.07,
+    "temperature": 0.5,
     "eval_epochs": 100,
+    "seed":        42,
     "data_root":   "./data",
     "log_dir":     "./logs",
 }
@@ -50,14 +46,18 @@ BASE_CONFIG = {
 # run names are self-explanatory at a glance.
 
 AUG_PRESETS = [
-    "full_aug",           # baseline: crop + flip + color jitter (s=1) + grayscale
+    "full_aug",           # baseline: crop + flip + color jitter (s=0.5) + grayscale
     "no_color_jitter",    # remove color jitter
     "no_grayscale",       # remove random grayscale
     "no_hflip",           # remove horizontal flip
     "crop_only",          # only random resized crop, nothing else
-    "weak_crop",          # narrow crop scale (0.8–1.0) instead of (0.2–1.0)
-    "weak_color_s05",     # color jitter with halved strength (s=0.5)
+    "weak_crop",          # narrow crop scale (0.8–1.0) instead of (0.08–1.0)
+    "strong_color_s1",    # color jitter with doubled strength (s=1.0)
     "with_blur",          # add Gaussian blur (ImageNet-style variant)
+    # composition (paper Fig. 5): crop vs color alone and together
+    "no_aug",             # floor: no augmentation, identical views
+    "color_only",         # jitter + grayscale, no crop, no flip
+    "no_crop",            # full minus crop
 ]
 
 
@@ -79,6 +79,7 @@ def build_command(aug_preset: str, cfg: dict) -> list[str]:
         f"--eval_epochs={cfg['eval_epochs']}",
         f"--data_root={cfg['data_root']}",
         f"--log_dir={cfg['log_dir']}",
+        f"--seed={cfg['seed']}",
         f"--run_name={run_name}",
     ]
 
@@ -92,7 +93,8 @@ def run_all(cfg: dict, dry_run: bool = False):
     print(f"SimCLR augmentation ablation — {len(AUG_PRESETS)} runs")
     print(f"Fixed: bs={cfg['batch_size']}, "
           f"ep={cfg['epochs']}, "
-          f"τ={cfg['temperature']}")
+          f"τ={cfg['temperature']}, "
+          f"seed={cfg['seed']}")
     print(f"{'─'*60}\n")
 
     for i, preset in enumerate(AUG_PRESETS, 1):
@@ -135,6 +137,7 @@ def main():
         "batch_size":  args.batch_size,
         "temperature": BASE_CONFIG["temperature"],
         "eval_epochs": args.eval_epochs,
+        "seed":        BASE_CONFIG["seed"],
         "data_root":   args.data_root,
         "log_dir":     args.log_dir,
     }

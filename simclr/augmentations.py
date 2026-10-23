@@ -39,15 +39,16 @@ class AugmentationConfig:
     """All knobs exposed for the augmentation ablation study."""
 
     # Crop
+    use_crop: bool = True
     crop_size: int = 32
-    crop_scale: Tuple[float, float] = (0.2, 1.0)  # SimCLR default
+    crop_scale: Tuple[float, float] = (0.08, 1.0)  # SimCLR default (RandomResizedCrop)
 
     # Flip
     use_hflip: bool = True
 
     # Color jitter
     use_color_jitter: bool = True
-    color_jitter_strength: float = 1.0          # SimCLR: s=1 for CIFAR
+    color_jitter_strength: float = 0.5          # SimCLR: s=0.5 for CIFAR (App. B.9)
     jitter_brightness: float = 0.8              # scaled by s inside factory
     jitter_contrast: float = 0.8
     jitter_saturation: float = 0.8
@@ -71,10 +72,7 @@ class AugmentationConfig:
     tag: str = "full"
 
 
-import math
 import torch
-import torch.nn as nn
-import torchvision.transforms.v2 as v2
 from torchvision.datasets import CIFAR10
 
 # Fast CDN mirror for CIFAR-10
@@ -99,56 +97,52 @@ def load_cifar10_gpu(data_root: str, train: bool, device: torch.device):
 
 
 # ---------------------------------------------------------------------------
-# SimCLR Transform via torchvision.transforms.v2 (Runs natively on GPU tensors)
+# SimCLR Transform (per image, on CPU inside DataLoader workers)
 # ---------------------------------------------------------------------------
 
-def build_simclr_transform(cfg: AugmentationConfig) -> v2.Compose:
+def build_simclr_transform(cfg: AugmentationConfig) -> T.Compose:
     """
-    Build a standard SimCLR augmentation pipeline using torchvision.transforms.v2.
-    Runs directly on CUDA tensors (B, 3, 32, 32) in [0.0, 1.0].
+    Build a standard SimCLR augmentation pipeline.
+    Operates on a single PIL image, so every image gets its own random draw.
     """
     s = cfg.color_jitter_strength
     transforms: List[Callable] = []
 
     # 1. Random resized crop
-    transforms.append(
-        v2.RandomResizedCrop(
-            size=cfg.crop_size,
-            scale=cfg.crop_scale,
-            antialias=True,
-        )
-    )
+    if cfg.use_crop:
+        transforms.append(T.RandomResizedCrop(size=cfg.crop_size, scale=cfg.crop_scale))
 
     # 2. Horizontal flip
     if cfg.use_hflip:
-        transforms.append(v2.RandomHorizontalFlip(p=0.5))
+        transforms.append(T.RandomHorizontalFlip(p=0.5))
 
     # 3. Color jitter (Brightness, Contrast, Saturation, Hue)
     if cfg.use_color_jitter:
-        jitter = v2.ColorJitter(
+        jitter = T.ColorJitter(
             brightness=cfg.jitter_brightness * s,
             contrast=cfg.jitter_contrast * s,
             saturation=cfg.jitter_saturation * s,
             hue=cfg.jitter_hue * s,
         )
-        transforms.append(v2.RandomApply([jitter], p=cfg.jitter_prob))
+        transforms.append(T.RandomApply([jitter], p=cfg.jitter_prob))
 
     # 4. Random grayscale
     if cfg.use_grayscale:
-        transforms.append(v2.RandomGrayscale(p=cfg.grayscale_prob))
+        transforms.append(T.RandomGrayscale(p=cfg.grayscale_prob))
 
     # 5. Gaussian blur (optional)
     if cfg.use_blur:
-        blur = v2.GaussianBlur(
+        blur = T.GaussianBlur(
             kernel_size=cfg.blur_kernel_size,
             sigma=cfg.blur_sigma,
         )
-        transforms.append(v2.RandomApply([blur], p=0.5))
+        transforms.append(T.RandomApply([blur], p=0.5))
 
-    # 6. Normalize
-    transforms.append(v2.Normalize(mean=cfg.mean, std=cfg.std))
+    # 6. To tensor + normalize
+    transforms.append(T.ToTensor())
+    transforms.append(T.Normalize(mean=cfg.mean, std=cfg.std))
 
-    return v2.Compose(transforms)
+    return T.Compose(transforms)
 
 
 # ---------------------------------------------------------------------------
@@ -233,9 +227,30 @@ def get_with_blur() -> AugmentationConfig:
     return AugmentationConfig(use_blur=True, tag="with_blur")
 
 
-def get_weak_color() -> AugmentationConfig:
-    """Ablation: halved color jitter strength (s=0.5)."""
-    return AugmentationConfig(color_jitter_strength=0.5, tag="weak_color_s05")
+def get_strong_color() -> AugmentationConfig:
+    """Ablation: doubled color jitter strength (s=1.0, ImageNet setting)."""
+    return AugmentationConfig(color_jitter_strength=1.0, tag="strong_color_s1")
+
+
+def get_no_crop() -> AugmentationConfig:
+    """Ablation: remove random resized crop (flip + jitter + grayscale only)."""
+    return AugmentationConfig(use_crop=False, tag="no_crop")
+
+
+def get_color_only() -> AugmentationConfig:
+    """Ablation: color distortion only (jitter + grayscale; no crop, no flip)."""
+    return AugmentationConfig(use_crop=False, use_hflip=False, tag="color_only")
+
+
+def get_no_aug() -> AugmentationConfig:
+    """Floor baseline: no augmentation, both views identical (normalize only)."""
+    return AugmentationConfig(
+        use_crop=False,
+        use_hflip=False,
+        use_color_jitter=False,
+        use_grayscale=False,
+        tag="no_aug",
+    )
 
 
 # Lookup table used by train.py / configs
@@ -247,7 +262,10 @@ AUGMENTATION_REGISTRY: dict[str, Callable[[], AugmentationConfig]] = {
     "crop_only":         get_crop_only,
     "weak_crop":         get_weak_crop,
     "with_blur":         get_with_blur,
-    "weak_color_s05":    get_weak_color,
+    "strong_color_s1":   get_strong_color,
+    "no_crop":           get_no_crop,
+    "color_only":        get_color_only,
+    "no_aug":            get_no_aug,
 }
 
 

@@ -10,7 +10,7 @@ Architecture follows Chen et al. 2020 (SimCLR v1):
 
 Loss: NT-Xent  (Normalized Temperature-scaled Cross Entropy)
   - Operates on L2-normalised z vectors
-  - Temperature τ (default 0.07)
+  - Temperature τ (default 0.5, SimCLR CIFAR-10 setting)
 
 Reference: https://arxiv.org/abs/2002.05709
 """
@@ -59,9 +59,6 @@ class ProjectionHead(nn.Module):
             nn.BatchNorm1d(hidden_dim),
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, out_dim, bias=False),
-            nn.BatchNorm1d(out_dim),   # SimCLR v1 leaves the final layer without BN;
-                                        # many clean reproductions include it — keep for
-                                        # numerical stability; ablation can turn it off.
         )
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
@@ -83,7 +80,7 @@ class NTXentLoss(nn.Module):
     Implementation follows Algorithm 1 in Chen et al. 2020.
     """
 
-    def __init__(self, temperature: float = 0.07):
+    def __init__(self, temperature: float = 0.5):
         super().__init__()
         self.temperature = temperature
 

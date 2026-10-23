@@ -81,7 +81,7 @@ def linear_eval(
     log_every: int = 10,    # log accuracy every N epochs
 ) -> float:
     """
-    Run frozen linear probe. Returns best top-1 accuracy (%) on test set.
+    Run frozen linear probe. Returns final-epoch top-1 accuracy (%) on test set.
     All print output mirrors to the same .log file via `logger`.
     """
     # Use logger if given, else fall back to plain print
@@ -128,7 +128,6 @@ def linear_eval(
     emit(f"  {'Epoch':>6}  {'Top-1 Acc':>10}")
     emit("  " + "-" * 20)
 
-    best_acc = 0.0
     num_train = train_feats.shape[0]
 
     for epoch in range(1, epochs + 1):
@@ -150,7 +149,6 @@ def linear_eval(
             total = test_labels.size(0)
 
         acc      = 100.0 * correct / total
-        best_acc = max(best_acc, acc)
 
         if wandb_run is not None:
             wandb_run.log({
@@ -161,5 +159,5 @@ def linear_eval(
         if epoch % log_every == 0 or epoch == epochs:
             emit(f"  {epoch:>6d}  {acc:>9.2f}%")
 
-    emit(f"  Best Top-1 Accuracy: {best_acc:.2f}%")
-    return best_acc
+    emit(f"  Final Top-1 Accuracy: {acc:.2f}%")
+    return acc

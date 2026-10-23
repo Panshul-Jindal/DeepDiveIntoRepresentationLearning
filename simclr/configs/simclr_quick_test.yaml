@@ -7,7 +7,7 @@ model:
   zero_init_residual: true
 
 loss:
-  temperature: 0.07
+  temperature: 0.5
 
 augmentation:
   preset: full_aug
@@ -15,7 +15,7 @@ augmentation:
 training:
   epochs: 5
   batch_size: 256
-  optimizer: adam
+  optimizer: lars
   lr: null
   weight_decay: 1.0e-6
   warmup_epochs: 2

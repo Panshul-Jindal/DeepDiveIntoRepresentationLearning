@@ -39,7 +39,7 @@ import wandb
 
 from augmentations import (
     build_simclr_transform,
-    load_cifar10_gpu,
+    TwoViewTransform,
     get_augmentation_config,
     AUGMENTATION_REGISTRY,
 )
@@ -62,7 +62,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--proj_out_dim",    type=int, default=128)
 
     # ── Loss ──────────────────────────────────────────────────────────────
-    p.add_argument("--temperature", type=float, default=0.07)
+    p.add_argument("--temperature", type=float, default=0.5)
 
     # ── Augmentation ──────────────────────────────────────────────────────
     p.add_argument(
@@ -71,14 +71,14 @@ def parse_args() -> argparse.Namespace:
     )
 
     # ── Training ──────────────────────────────────────────────────────────
-    p.add_argument("--epochs",        type=int,   default=500)
+    p.add_argument("--epochs",        type=int,   default=100)
     p.add_argument("--batch_size",    type=int,   default=512)
     p.add_argument("--lr",            type=float, default=None,
-                   help="Base LR. Default: 0.3 × batch_size/256")
+                   help="Base LR. Default (LARS/SGD): 0.3 × batch_size/256")
     p.add_argument("--weight_decay",  type=float, default=1e-6)
     p.add_argument("--warmup_epochs", type=int,   default=10)
-    p.add_argument("--optimizer",     type=str,   default="adam",
-                   choices=["adam", "sgd"])
+    p.add_argument("--optimizer",     type=str,   default="lars",
+                   choices=["lars", "adam", "sgd"])
 
     # ── AMP ───────────────────────────────────────────────────────────────
     p.add_argument("--amp",    action="store_true",  default=True)
@@ -105,6 +105,46 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--offline",       action="store_true")
 
     return p.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# LARS optimizer (You et al. 2017), as used by SimCLR
+# ---------------------------------------------------------------------------
+
+class LARS(optim.Optimizer):
+    """
+    SGD + momentum with layer-wise trust ratio η·‖w‖/‖g + wd·w‖.
+    Biases and BN parameters (ndim == 1) skip weight decay and LARS
+    adaptation, following SimCLR.
+    """
+
+    def __init__(self, params, lr: float, weight_decay: float = 0.0,
+                 momentum: float = 0.9, eta: float = 0.001):
+        super().__init__(params, dict(lr=lr, weight_decay=weight_decay,
+                                      momentum=momentum, eta=eta))
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        for g in self.param_groups:
+            for p in g["params"]:
+                if p.grad is None:
+                    continue
+                dp = p.grad
+                if p.ndim > 1:
+                    dp = dp.add(p, alpha=g["weight_decay"])
+                    w_norm, g_norm = torch.norm(p), torch.norm(dp)
+                    trust = torch.where(
+                        (w_norm > 0) & (g_norm > 0),
+                        g["eta"] * w_norm / g_norm,
+                        torch.ones_like(w_norm),
+                    )
+                    dp = dp.mul(trust)
+                state = self.state[p]
+                if "mu" not in state:
+                    state["mu"] = torch.zeros_like(p)
+                mu = state["mu"]
+                mu.mul_(g["momentum"]).add_(dp)
+                p.add_(mu, alpha=-g["lr"])
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +276,8 @@ def train(args: argparse.Namespace):
     log.info("")
     log.info("  ── Augmentation ───────────────────────────────────────")
     log.info(f"  Preset         : {args.aug_preset}  (tag: {aug_cfg.tag})")
-    log.info(f"  Random crop    : scale={aug_cfg.crop_scale}, size={aug_cfg.crop_size}")
+    log.info(f"  Random crop    : {aug_cfg.use_crop}"
+             + (f"  (scale={aug_cfg.crop_scale}, size={aug_cfg.crop_size})" if aug_cfg.use_crop else ""))
     log.info(f"  Horiz flip     : {aug_cfg.use_hflip}")
     log.info(f"  Color jitter   : {aug_cfg.use_color_jitter}"
              + (f"  (strength s={aug_cfg.color_jitter_strength})" if aug_cfg.use_color_jitter else ""))
@@ -272,6 +313,7 @@ def train(args: argparse.Namespace):
             "temperature":           args.temperature,
             "aug_preset":            args.aug_preset,
             "aug_tag":               aug_cfg.tag,
+            "use_crop":              aug_cfg.use_crop,
             "crop_scale":            list(aug_cfg.crop_scale),
             "use_hflip":             aug_cfg.use_hflip,
             "use_color_jitter":      aug_cfg.use_color_jitter,
@@ -290,27 +332,37 @@ def train(args: argparse.Namespace):
         tags=["simclr", aug_cfg.tag],
     )
 
-    # ── Dataset & 100% GPU-native Augmentations ───────────────────────────
+    # ── Dataset: two independently augmented views per image (CPU workers) ─
     torch.backends.cudnn.benchmark = True
-    log.info("Loading CIFAR-10 directly into GPU VRAM (150 MB) ...")
-    train_data, _ = load_cifar10_gpu(args.data_root, train=True, device=device)
-    gpu_aug = build_simclr_transform(aug_cfg)
-    num_samples = train_data.shape[0]
-    num_batches = num_samples // args.batch_size
-    log.info(f"Dataset in GPU VRAM: {num_samples} images | {num_batches} batches/epoch (bs={args.batch_size})")
+    train_set = CIFAR10(
+        args.data_root, train=True, download=True,
+        transform=TwoViewTransform(build_simclr_transform(aug_cfg)),
+    )
+    train_loader = DataLoader(
+        train_set,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=True,
+        persistent_workers=args.num_workers > 0,
+    )
+    num_batches = len(train_loader)
+    log.info(f"Dataset: {len(train_set)} images | {num_batches} batches/epoch (bs={args.batch_size})")
 
     # ── Optimizer + scheduler ─────────────────────────────────────────────
-    optimizer = (
-        optim.Adam(model.parameters(), lr=base_lr, weight_decay=args.weight_decay)
-        if args.optimizer == "adam"
-        else optim.SGD(model.parameters(), lr=base_lr,
-                       momentum=0.9, weight_decay=args.weight_decay)
-    )
+    if args.optimizer == "lars":
+        optimizer = LARS(model.parameters(), lr=base_lr, weight_decay=args.weight_decay)
+    elif args.optimizer == "adam":
+        optimizer = optim.Adam(model.parameters(), lr=base_lr, weight_decay=args.weight_decay)
+    else:
+        optimizer = optim.SGD(model.parameters(), lr=base_lr,
+                              momentum=0.9, weight_decay=args.weight_decay)
     scheduler = make_scheduler(optimizer, args.warmup_epochs, args.epochs)
     scaler    = GradScaler(enabled=args.amp)
 
     # ── Pre-training loop ─────────────────────────────────────────────────
-    log.info(f"Starting pre-training (100% on GPU) ...")
+    log.info(f"Starting pre-training ...")
     log.info(f"{'Epoch':>6}  {'Loss':>10}  {'LR':>12}  {'Ep time':>9}  {'Elapsed':>9}  {'ETA':>9}")
     log.info("-" * 65)
 
@@ -321,16 +373,9 @@ def train(args: argparse.Namespace):
         epoch_loss = 0.0
         t0 = time.time()
 
-        # Shuffle indices directly on GPU (0.01 ms)
-        perm = torch.randperm(num_samples, device=device)
-
-        for b in range(num_batches):
-            batch_idx = perm[b * args.batch_size : (b + 1) * args.batch_size]
-            raw_batch = train_data[batch_idx].float() / 255.0  # (B, 3, 32, 32) on GPU
-
-            # 2 independent views generated directly on GPU (1 ms)
-            x1 = gpu_aug(raw_batch)
-            x2 = gpu_aug(raw_batch)
+        for (x1, x2), _ in train_loader:
+            x1 = x1.to(device, non_blocking=True)
+            x2 = x2.to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
             with autocast(enabled=args.amp):
@@ -391,7 +436,7 @@ def train(args: argparse.Namespace):
         log.info(f"  Epochs: {args.eval_epochs}  LR: {args.eval_lr}")
         log.info("")
 
-        best_acc = linear_eval(
+        final_acc = linear_eval(
             backbone=model.encoder,
             device=device,
             data_root=args.data_root,
@@ -418,7 +463,7 @@ def train(args: argparse.Namespace):
             f"  Eval epochs     : {args.eval_epochs}",
             f"  Eval LR         : {args.eval_lr}",
             f"",
-            f"  >>> Best Top-1 Accuracy: {best_acc:.2f}%",
+            f"  >>> Final Top-1 Accuracy: {final_acc:.2f}%",
             "=" * 65,
         ]
         eval_file.parent.mkdir(parents=True, exist_ok=True)
@@ -427,8 +472,8 @@ def train(args: argparse.Namespace):
         for line in summary_lines:
             log.info(line)
 
-        wandb.summary["linear_eval/best_top1_acc"] = best_acc
-        wandb.log({"linear_eval/best_top1_acc": best_acc})
+        wandb.summary["linear_eval/final_top1_acc"] = final_acc
+        wandb.log({"linear_eval/final_top1_acc": final_acc})
 
     wandb.finish()
     log.info("Done.")
