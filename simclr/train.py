@@ -32,11 +32,14 @@ from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR10
 
+# Use fast CDN mirror (HuggingFace) instead of slow University of Toronto server
+CIFAR10.url = "https://huggingface.co/datasets/xingslong/cifar-10-batches-py/resolve/main/cifar-10-python.tar.gz"
+
 import wandb
 
 from augmentations import (
-    TwoViewTransform,
     build_simclr_transform,
+    load_cifar10_gpu,
     get_augmentation_config,
     AUGMENTATION_REGISTRY,
 )
@@ -82,7 +85,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no_amp", dest="amp", action="store_false")
 
     # ── System ────────────────────────────────────────────────────────────
-    p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--num_workers", type=int, default=16)
     p.add_argument("--device",      type=str, default="cuda")
     p.add_argument("--seed",        type=int, default=42)
 
@@ -287,15 +290,14 @@ def train(args: argparse.Namespace):
         tags=["simclr", aug_cfg.tag],
     )
 
-    # ── Dataset ───────────────────────────────────────────────────────────
-    train_ds = CIFAR10(
-        args.data_root, train=True, download=True,
-        transform=TwoViewTransform(build_simclr_transform(aug_cfg)),
-    )
-    train_loader = DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=True,
-        num_workers=args.num_workers, pin_memory=True, drop_last=True,
-    )
+    # ── Dataset & 100% GPU-native Augmentations ───────────────────────────
+    torch.backends.cudnn.benchmark = True
+    log.info("Loading CIFAR-10 directly into GPU VRAM (150 MB) ...")
+    train_data, _ = load_cifar10_gpu(args.data_root, train=True, device=device)
+    gpu_aug = build_simclr_transform(aug_cfg)
+    num_samples = train_data.shape[0]
+    num_batches = num_samples // args.batch_size
+    log.info(f"Dataset in GPU VRAM: {num_samples} images | {num_batches} batches/epoch (bs={args.batch_size})")
 
     # ── Optimizer + scheduler ─────────────────────────────────────────────
     optimizer = (
@@ -307,10 +309,8 @@ def train(args: argparse.Namespace):
     scheduler = make_scheduler(optimizer, args.warmup_epochs, args.epochs)
     scaler    = GradScaler(enabled=args.amp)
 
-    wandb.watch(model, log="gradients", log_freq=500)
-
     # ── Pre-training loop ─────────────────────────────────────────────────
-    log.info(f"Starting pre-training ...")
+    log.info(f"Starting pre-training (100% on GPU) ...")
     log.info(f"{'Epoch':>6}  {'Loss':>10}  {'LR':>12}  {'Ep time':>9}  {'Elapsed':>9}  {'ETA':>9}")
     log.info("-" * 65)
 
@@ -321,12 +321,22 @@ def train(args: argparse.Namespace):
         epoch_loss = 0.0
         t0 = time.time()
 
-        for (x1, x2), _ in train_loader:
-            x1, x2 = x1.to(device, non_blocking=True), x2.to(device, non_blocking=True)
-            optimizer.zero_grad()
+        # Shuffle indices directly on GPU (0.01 ms)
+        perm = torch.randperm(num_samples, device=device)
+
+        for b in range(num_batches):
+            batch_idx = perm[b * args.batch_size : (b + 1) * args.batch_size]
+            raw_batch = train_data[batch_idx].float() / 255.0  # (B, 3, 32, 32) on GPU
+
+            # 2 independent views generated directly on GPU (1 ms)
+            x1 = gpu_aug(raw_batch)
+            x2 = gpu_aug(raw_batch)
+
+            optimizer.zero_grad(set_to_none=True)
             with autocast(enabled=args.amp):
                 z1, z2 = model(x1, x2)
                 loss   = criterion(z1, z2)
+
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -334,7 +344,7 @@ def train(args: argparse.Namespace):
 
         scheduler.step()
 
-        avg_loss  = epoch_loss / len(train_loader)
+        avg_loss  = epoch_loss / num_batches
         cur_lr    = scheduler.get_last_lr()[0]
         epoch_t   = time.time() - t0
         elapsed   = time.time() - total_start

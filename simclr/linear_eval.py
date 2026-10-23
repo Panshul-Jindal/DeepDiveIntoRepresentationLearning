@@ -27,7 +27,10 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision.datasets import CIFAR10
 
-from augmentations import build_eval_transform
+# Use fast CDN mirror (HuggingFace) instead of slow University of Toronto server
+CIFAR10.url = "https://huggingface.co/datasets/xingslong/cifar-10-batches-py/resolve/main/cifar-10-python.tar.gz"
+
+from augmentations import load_cifar10_gpu, CIFAR10_MEAN, CIFAR10_STD
 
 
 # ---------------------------------------------------------------------------
@@ -89,30 +92,31 @@ def linear_eval(
         p.requires_grad_(False)
     backbone.eval()
 
-    # ── Datasets ─────────────────────────────────────────────────────────
-    eval_tf  = build_eval_transform()
-    train_ds = CIFAR10(data_root, train=True,  download=True, transform=eval_tf)
-    test_ds  = CIFAR10(data_root, train=False, download=True, transform=eval_tf)
+    # ── Load datasets into GPU VRAM (instant, zero CPU DataLoader) ────────
+    emit("  Loading datasets into GPU VRAM ...")
+    train_data, train_labels = load_cifar10_gpu(data_root, train=True, device=device)
+    test_data,  test_labels  = load_cifar10_gpu(data_root, train=False, device=device)
 
-    raw_train = DataLoader(train_ds, batch_size=batch_size, shuffle=False,
-                           num_workers=4, pin_memory=True)
-    raw_test  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False,
-                           num_workers=4, pin_memory=True)
+    mean = torch.tensor(CIFAR10_MEAN, device=device).view(1, 3, 1, 1)
+    std  = torch.tensor(CIFAR10_STD,  device=device).view(1, 3, 1, 1)
 
-    # ── Extract features once ─────────────────────────────────────────────
-    emit("  Extracting train features ...")
-    train_feats, train_labels = extract_features(backbone, raw_train, device)
-    emit("  Extracting test features ...")
-    test_feats, test_labels   = extract_features(backbone, raw_test,  device)
+    train_norm = (train_data.float() / 255.0 - mean) / std
+    test_norm  = (test_data.float()  / 255.0 - mean) / std
 
-    train_feat_loader = DataLoader(
-        TensorDataset(train_feats, train_labels),
-        batch_size=512, shuffle=True, num_workers=0,
-    )
-    test_feat_loader = DataLoader(
-        TensorDataset(test_feats, test_labels),
-        batch_size=512, shuffle=False, num_workers=0,
-    )
+    # ── Extract features once directly on GPU (~2 seconds) ────────────────
+    emit("  Extracting train features on GPU ...")
+    train_feats = []
+    with torch.no_grad():
+        for i in range(0, train_norm.shape[0], 1024):
+            train_feats.append(backbone(train_norm[i : i + 1024]))
+    train_feats = torch.cat(train_feats, dim=0)
+
+    emit("  Extracting test features on GPU ...")
+    test_feats = []
+    with torch.no_grad():
+        for i in range(0, test_norm.shape[0], 1024):
+            test_feats.append(backbone(test_norm[i : i + 1024]))
+    test_feats = torch.cat(test_feats, dim=0)
 
     # ── Linear head ───────────────────────────────────────────────────────
     classifier = LinearClassifier(feature_dim=train_feats.shape[1]).to(device)
@@ -125,25 +129,25 @@ def linear_eval(
     emit("  " + "-" * 20)
 
     best_acc = 0.0
+    num_train = train_feats.shape[0]
 
     for epoch in range(1, epochs + 1):
-        # Train linear head
+        # Train linear head directly on GPU
         classifier.train()
-        for feat, lbl in train_feat_loader:
-            feat, lbl = feat.to(device), lbl.to(device)
-            optimizer.zero_grad()
-            criterion(classifier(feat), lbl).backward()
+        perm = torch.randperm(num_train, device=device)
+        for i in range(0, num_train, 512):
+            batch_idx = perm[i : i + 512]
+            optimizer.zero_grad(set_to_none=True)
+            criterion(classifier(train_feats[batch_idx]), train_labels[batch_idx]).backward()
             optimizer.step()
         scheduler.step()
 
-        # Evaluate
+        # Evaluate directly on GPU
         classifier.eval()
-        correct = total = 0
         with torch.no_grad():
-            for feat, lbl in test_feat_loader:
-                feat, lbl = feat.to(device), lbl.to(device)
-                correct += (classifier(feat).argmax(1) == lbl).sum().item()
-                total   += lbl.size(0)
+            preds = classifier(test_feats).argmax(dim=1)
+            correct = (preds == test_labels).sum().item()
+            total = test_labels.size(0)
 
         acc      = 100.0 * correct / total
         best_acc = max(best_acc, acc)

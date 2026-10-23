@@ -71,58 +71,84 @@ class AugmentationConfig:
     tag: str = "full"
 
 
+import math
+import torch
+import torch.nn as nn
+import torchvision.transforms.v2 as v2
+from torchvision.datasets import CIFAR10
+
+# Fast CDN mirror for CIFAR-10
+CIFAR10.url = "https://huggingface.co/datasets/xingslong/cifar-10-batches-py/resolve/main/cifar-10-python.tar.gz"
+
+
 # ---------------------------------------------------------------------------
-# Core builder
+# GPU Dataset Loader (loads 150 MB into VRAM once)
 # ---------------------------------------------------------------------------
 
-def build_simclr_transform(cfg: AugmentationConfig) -> T.Compose:
+def load_cifar10_gpu(data_root: str, train: bool, device: torch.device):
     """
-    Build a single-view SimCLR augmentation pipeline from *cfg*.
-    Call it twice independently to get the two contrastive views.
+    Load CIFAR-10 raw images directly into GPU VRAM as a contiguous tensor.
+    Train: 50,000 x 3 x 32 x 32 uint8 = ~150 MB VRAM.
+    Test:  10,000 x 3 x 32 x 32 uint8 = ~30 MB VRAM.
+    """
+    ds = CIFAR10(data_root, train=train, download=True)
+    data = torch.from_numpy(ds.data).permute(0, 3, 1, 2)  # (N, 3, 32, 32)
+    data = data.to(device, non_blocking=True)
+    targets = torch.tensor(ds.targets, dtype=torch.int64, device=device)
+    return data, targets
+
+
+# ---------------------------------------------------------------------------
+# SimCLR Transform via torchvision.transforms.v2 (Runs natively on GPU tensors)
+# ---------------------------------------------------------------------------
+
+def build_simclr_transform(cfg: AugmentationConfig) -> v2.Compose:
+    """
+    Build a standard SimCLR augmentation pipeline using torchvision.transforms.v2.
+    Runs directly on CUDA tensors (B, 3, 32, 32) in [0.0, 1.0].
     """
     s = cfg.color_jitter_strength
     transforms: List[Callable] = []
 
     # 1. Random resized crop
     transforms.append(
-        T.RandomResizedCrop(
+        v2.RandomResizedCrop(
             size=cfg.crop_size,
             scale=cfg.crop_scale,
-            interpolation=T.InterpolationMode.BILINEAR,
+            antialias=True,
         )
     )
 
     # 2. Horizontal flip
     if cfg.use_hflip:
-        transforms.append(T.RandomHorizontalFlip(p=0.5))
+        transforms.append(v2.RandomHorizontalFlip(p=0.5))
 
-    # 3. Color jitter
+    # 3. Color jitter (Brightness, Contrast, Saturation, Hue)
     if cfg.use_color_jitter:
-        jitter = T.ColorJitter(
+        jitter = v2.ColorJitter(
             brightness=cfg.jitter_brightness * s,
             contrast=cfg.jitter_contrast * s,
             saturation=cfg.jitter_saturation * s,
             hue=cfg.jitter_hue * s,
         )
-        transforms.append(T.RandomApply([jitter], p=cfg.jitter_prob))
+        transforms.append(v2.RandomApply([jitter], p=cfg.jitter_prob))
 
     # 4. Random grayscale
     if cfg.use_grayscale:
-        transforms.append(T.RandomGrayscale(p=cfg.grayscale_prob))
+        transforms.append(v2.RandomGrayscale(p=cfg.grayscale_prob))
 
     # 5. Gaussian blur (optional)
     if cfg.use_blur:
-        blur = T.GaussianBlur(
+        blur = v2.GaussianBlur(
             kernel_size=cfg.blur_kernel_size,
             sigma=cfg.blur_sigma,
         )
-        transforms.append(T.RandomApply([blur], p=0.5))
+        transforms.append(v2.RandomApply([blur], p=0.5))
 
-    # 6. To tensor + normalize
-    transforms.append(T.ToTensor())
-    transforms.append(T.Normalize(mean=cfg.mean, std=cfg.std))
+    # 6. Normalize
+    transforms.append(v2.Normalize(mean=cfg.mean, std=cfg.std))
 
-    return T.Compose(transforms)
+    return v2.Compose(transforms)
 
 
 # ---------------------------------------------------------------------------
