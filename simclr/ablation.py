@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -89,14 +90,16 @@ def build_command(aug_preset: str, cfg: dict) -> list[str]:
 # Runner
 # ---------------------------------------------------------------------------
 
-def run_all(cfg: dict, presets: list[str], dry_run: bool = False):
+def run_all(cfg: dict, presets: list[str], parallel: int = 1, dry_run: bool = False):
     print(f"\n{'─'*60}")
     print(f"SimCLR augmentation ablation — {len(presets)} runs")
     print(f"Fixed: bs={cfg['batch_size']}, "
           f"ep={cfg['epochs']}, "
           f"τ={cfg['temperature']}, "
-          f"seed={cfg['seed']}")
+          f"seed={cfg['seed']}, parallel={parallel}")
     print(f"{'─'*60}\n")
+
+    pending = []
 
     for i, preset in enumerate(presets, 1):
         cmd = build_command(preset, cfg)
@@ -108,11 +111,44 @@ def run_all(cfg: dict, presets: list[str], dry_run: bool = False):
             print(f"           skip: already finished ({run_name}_eval.txt exists)\n")
             continue
         print(f"           cmd: {' '.join(cmd)}\n")
+        pending.append((run_name, cmd))
 
-        if not dry_run:
-            result = subprocess.run(cmd)
-            if result.returncode != 0:
-                print(f"  !! Run failed with code {result.returncode}")
+    if dry_run or not pending:
+        return
+
+    # Download once up front so concurrent runs don't race on the same files
+    from augmentations import CIFAR10
+    CIFAR10(cfg["data_root"], train=True, download=True)
+    CIFAR10(cfg["data_root"], train=False, download=True)
+
+    log_dir = Path(cfg["log_dir"])
+    log_dir.mkdir(parents=True, exist_ok=True)
+    running: list[tuple[str, subprocess.Popen]] = []
+
+    def reap():
+        """Drop finished runs from `running` and report their status."""
+        for run_name, proc in list(running):
+            if proc.poll() is not None:
+                running.remove((run_name, proc))
+                status = "done" if proc.returncode == 0 else f"!! failed (code {proc.returncode})"
+                print(f"  {run_name}: {status}", flush=True)
+
+    for run_name, cmd in pending:
+        reap()
+        while len(running) >= parallel:
+            time.sleep(10)
+            reap()
+        if parallel == 1:
+            stdout = None   # stream live to the terminal
+        else:
+            # Interleaved output would be unreadable; each run gets its own file
+            stdout = open(log_dir / f"{run_name}.out", "w")
+            print(f"  {run_name}: started (output → {log_dir / (run_name + '.out')})", flush=True)
+        running.append((run_name, subprocess.Popen(cmd, stdout=stdout, stderr=subprocess.STDOUT)))
+
+    while running:
+        time.sleep(10)
+        reap()
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +170,8 @@ def main():
     p.add_argument("--presets", type=str, nargs="+", default=AUG_PRESETS,
                    choices=AUG_PRESETS,
                    help="Subset of presets to run (default: all)")
+    p.add_argument("--parallel", type=int, default=1,
+                   help="Number of runs to train concurrently on the same GPU (default: 1)")
     p.add_argument("--aug_backend", type=str, default="auto",
                    choices=["auto", "cpu", "gpu"],
                    help="cpu = torchvision, gpu = Kornia, auto = by CPU count (default)")
@@ -155,7 +193,7 @@ def main():
         "log_dir":     args.log_dir,
     }
 
-    run_all(cfg, args.presets, dry_run=args.dry_run)
+    run_all(cfg, args.presets, parallel=args.parallel, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
