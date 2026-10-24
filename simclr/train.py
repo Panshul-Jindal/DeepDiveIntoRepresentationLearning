@@ -100,6 +100,8 @@ def parse_args() -> argparse.Namespace:
     # ── Logging ───────────────────────────────────────────────────────────
     p.add_argument("--log_dir", type=str, default="./logs",
                    help="Directory for .log files, checkpoints, eval summaries")
+    p.add_argument("--save_epochs", type=int, nargs="*", default=[],
+                   help="Intermediate epochs at which to save a checkpoint .pt")
 
     # ── Linear eval ───────────────────────────────────────────────────────
     p.add_argument("--eval_epochs", type=int,   default=100)
@@ -110,7 +112,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--wandb_project", type=str, default="simclr-cifar10")
     p.add_argument("--wandb_entity",  type=str, default=None)
     p.add_argument("--run_name",      type=str, default=None)
-    p.add_argument("--offline",       action="store_true")
+    p.add_argument("--offline",       action="store_true", default=True,
+                   help="Run W&B in offline mode without network syncing (default: True)")
+    p.add_argument("--online",        dest="offline", action="store_false",
+                   help="Run W&B in online mode with live cloud sync")
 
     return p.parse_args()
 
@@ -443,6 +448,21 @@ def train(args: argparse.Namespace):
             f"{epoch:>6d}  {avg_loss:>10.4f}  {cur_lr:>12.2e}"
             f"  {epoch_t:>7.1f}s  {elapsed/60:>7.1f}m  {eta/60:>7.1f}m"
         )
+
+        # ── Save intermediate checkpoints if requested ────────────────────
+        if epoch in args.save_epochs:
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            ep_ckpt = ckpt_dir / f"{args.run_name}_ep{epoch}.pt"
+            torch.save(
+                {
+                    "model_state_dict":     model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "epoch":                epoch,
+                    "args":                 vars(args),
+                },
+                ep_ckpt,
+            )
+            log.info(f"Checkpoint saved at epoch {epoch}: {ep_ckpt}")
 
         # ── W&B ───────────────────────────────────────────────────────────
         wandb.log({

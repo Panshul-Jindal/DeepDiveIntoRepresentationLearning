@@ -70,7 +70,7 @@ def build_command(aug_preset: str, cfg: dict) -> list[str]:
     """Build the train.py command for a single augmentation preset."""
     run_name = f"simclr_{aug_preset}"   # e.g. simclr_no_color_jitter
 
-    return [
+    cmd = [
         sys.executable,
         str(Path(__file__).parent / "train.py"),
         f"--aug_preset={aug_preset}",
@@ -84,6 +84,11 @@ def build_command(aug_preset: str, cfg: dict) -> list[str]:
         f"--aug_backend={cfg['aug_backend']}",
         f"--run_name={run_name}",
     ]
+    if cfg.get("offline", True):
+        cmd.append("--offline")
+    else:
+        cmd.append("--online")
+    return cmd
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +180,10 @@ def main():
     p.add_argument("--aug_backend", type=str, default="auto",
                    choices=["auto", "cpu", "gpu"],
                    help="cpu = torchvision, gpu = Kornia, auto = by CPU count (default)")
+    p.add_argument("--offline", action="store_true", default=True,
+                   help="Run W&B offline without syncing (default: True)")
+    p.add_argument("--online", dest="offline", action="store_false",
+                   help="Sync W&B online")
     p.add_argument(
         "--dry_run",
         action="store_true",
@@ -191,6 +200,7 @@ def main():
         "aug_backend": args.aug_backend,
         "data_root":   args.data_root,
         "log_dir":     args.log_dir,
+        "offline":     args.offline,
     }
 
     run_all(cfg, args.presets, parallel=args.parallel, dry_run=args.dry_run)

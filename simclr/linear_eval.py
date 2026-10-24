@@ -161,3 +161,90 @@ def linear_eval(
 
     emit(f"  Final Top-1 Accuracy: {acc:.2f}%")
     return acc
+
+
+# ---------------------------------------------------------------------------
+# Evaluate directly from a saved .pt checkpoint
+# ---------------------------------------------------------------------------
+
+def eval_checkpoint(
+    ckpt_path: str | Path,
+    device: torch.device | None = None,
+    data_root: str = "./data",
+    eval_epochs: int = 100,
+    eval_lr: float = 0.1,
+    wandb_run=None,
+    logger=None,
+    eval_file: Path | None = None,
+) -> float:
+    """
+    Load a saved SimCLR checkpoint (.pt), extract ONLY its backbone (stripping
+    the projection head), freeze it, and run linear evaluation on CIFAR-10.
+    """
+    from model import SimCLR
+
+    ckpt_path = Path(ckpt_path)
+    if not ckpt_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    ckpt = torch.load(ckpt_path, map_location=device)
+    model = SimCLR().to(device)
+    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+        model.load_state_dict(ckpt["model_state_dict"])
+    else:
+        model.load_state_dict(ckpt)
+
+    backbone = model.encoder  # Strip projection head, retain only ResNet-18 backbone
+
+    acc = linear_eval(
+        backbone=backbone,
+        device=device,
+        data_root=data_root,
+        lr=eval_lr,
+        epochs=eval_epochs,
+        wandb_run=wandb_run,
+        logger=logger,
+    )
+
+    if eval_file is not None:
+        eval_file = Path(eval_file)
+        eval_file.parent.mkdir(parents=True, exist_ok=True)
+        summary_lines = [
+            "=" * 65,
+            "  Linear Evaluation Summary",
+            "=" * 65,
+            f"  Checkpoint      : {ckpt_path.name}",
+            f"  Eval epochs     : {eval_epochs}",
+            f"  Eval LR         : {eval_lr}",
+            f"",
+            f"  >>> Final Top-1 Accuracy: {acc:.2f}%",
+            "=" * 65,
+        ]
+        eval_file.write_text("\n".join(summary_lines) + "\n")
+
+    return acc
+
+
+if __name__ == "__main__":
+    import argparse
+    p = argparse.ArgumentParser(description="Evaluate a SimCLR checkpoint via linear probe")
+    p.add_argument("--ckpt", type=str, required=True, help="Path to checkpoint .pt file")
+    p.add_argument("--data_root", type=str, default="./data")
+    p.add_argument("--eval_epochs", type=int, default=100)
+    p.add_argument("--eval_lr", type=float, default=0.1)
+    p.add_argument("--eval_file", type=str, default=None)
+    p.add_argument("--device", type=str, default="cuda")
+    args = p.parse_args()
+
+    dev = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    eval_checkpoint(
+        ckpt_path=args.ckpt,
+        device=dev,
+        data_root=args.data_root,
+        eval_epochs=args.eval_epochs,
+        eval_lr=args.eval_lr,
+        eval_file=Path(args.eval_file) if args.eval_file else None,
+    )
