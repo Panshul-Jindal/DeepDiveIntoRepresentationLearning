@@ -4,19 +4,21 @@ SimCLR Batch Size Sweep & Training Time (Epochs) Sweep for CIFAR-10.
 Experiments executed:
   1. Batch Size 128: Pre-train 100 epochs -> Save checkpoint at epoch 100 -> Linear eval (100 ep)
   2. Batch Size 256: Pre-train 100 epochs -> Save checkpoint at epoch 100 -> Linear eval (100 ep)
-  3. Batch Size 512: Pre-train 200 epochs -> Save checkpoints at epochs 100, 125, 150, 175, 200
-                     -> Linear eval (100 ep) on all 5 checkpoints
+  3. Batch Size 512: Pre-train 200 epochs -> Save checkpoints at epochs 100, 150, 200
+                     -> Linear eval (100 ep) on all 3 checkpoints
+  4. Batch Size 1024: Pre-train 200 epochs -> Save checkpoints at epochs 100, 150, 200
+                      -> Linear eval (100 ep) on all 3 checkpoints
 
-This yields two full ablation studies in one sweep:
-  A. Batch Size Sweep: Compares 128 vs 256 vs 512 at 100 epochs.
-  B. Training Time Sweep: Compares 100, 125, 150, 175, 200 epochs on batch size 512.
+Yields two full ablation studies:
+  A. Batch Size Sweep: Compares 128 vs 256 vs 512 vs 1024 at 100 epochs.
+  B. Training Time Sweep: Compares 100, 150, 200 epochs on both BS 512 and BS 1024.
 
 Usage:
     # Dry run: view planned commands
-    python batch_size_training_time.py --dry_run
+    python batch_size_sweep.py --dry_run
 
     # Run full sweep
-    python batch_size_training_time.py
+    python batch_size_sweep.py
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from linear_eval import eval_checkpoint
 
 
 BASE_CONFIG = {
+    "lr":          1.0,
     "temperature": 0.5,
     "eval_epochs": 100,
     "eval_lr":     0.1,
@@ -47,7 +50,7 @@ BASE_CONFIG = {
     "offline":     True,
 }
 
-BS512_SAVE_EPOCHS = [100, 125, 150, 175, 200]
+MULTI_EPOCH_CHECKPOINTS = [100, 150, 200]
 
 
 def parse_eval_accuracy(eval_file: Path) -> float | None:
@@ -56,7 +59,6 @@ def parse_eval_accuracy(eval_file: Path) -> float | None:
         return None
     for line in eval_file.read_text().splitlines():
         if "Final Top-1 Accuracy:" in line or "Best Top-1 Accuracy:" in line:
-            # format: '  >>> Final Top-1 Accuracy: 78.09%'
             parts = line.split(":")[-1].strip().replace("%", "")
             try:
                 return float(parts)
@@ -84,8 +86,71 @@ def run_pretrain(cmd: list[str], run_name: str, log_dir: Path, dry_run: bool = F
     print(f"\nPre-training {run_name} completed in {elapsed/60:.1f} minutes.\n", flush=True)
 
 
+def evaluate_saved_checkpoints(run_name: str, epochs_list: list[int], args, log_dir: Path, ckpt_dir: Path):
+    """Evaluate checkpoints at epochs in epochs_list for a run."""
+    print(f"\n{'='*65}")
+    print(f"  Evaluating {run_name} checkpoints at epochs {epochs_list}")
+    print(f"{'='*65}\n", flush=True)
+
+    final_ckpt = ckpt_dir / f"{run_name}_final.pt"
+
+    for ep in epochs_list:
+        ep_ckpt = ckpt_dir / f"{run_name}_ep{ep}.pt"
+        if not ep_ckpt.exists() and ep == 200 and final_ckpt.exists():
+            ep_ckpt = final_ckpt
+
+        eval_file = log_dir / f"{run_name}_ep{ep}_eval.txt"
+
+        if eval_file.exists():
+            acc = parse_eval_accuracy(eval_file)
+            print(f"  [Epoch {ep:>3d}] Already evaluated: Top-1 Acc = {acc:.2f}% ({eval_file.name})")
+            continue
+
+        if args.dry_run:
+            print(f"  [Epoch {ep:>3d}] Would evaluate checkpoint: {ep_ckpt.name} -> {eval_file.name}")
+            continue
+
+        if not ep_ckpt.exists():
+            print(f"  !! Checkpoint for epoch {ep} not found at {ep_ckpt}. Skipping.")
+            continue
+
+        print(f"\n--- Running Linear Eval: {run_name}, Pretrained Epochs={ep} ---")
+        wb_run = None
+        if not args.offline:
+            import wandb
+            wb_run = wandb.init(
+                project="simclr-cifar10",
+                name=f"{run_name}_ep{ep}_eval",
+                mode="online",
+                config={
+                    "run_name":        run_name,
+                    "pretrain_epochs": ep,
+                    "eval_epochs":     args.eval_epochs,
+                    "eval_lr":         args.eval_lr,
+                },
+                tags=["simclr", "training_time_sweep", f"ep{ep}"],
+            )
+
+        acc = eval_checkpoint(
+            ckpt_path=ep_ckpt,
+            data_root=args.data_root,
+            eval_epochs=args.eval_epochs,
+            eval_lr=args.eval_lr,
+            wandb_run=wb_run,
+            eval_file=eval_file,
+        )
+
+        if wb_run is not None:
+            wb_run.summary["linear_eval/final_top1_acc"] = acc
+            wb_run.finish()
+
+        print(f"--- [Epoch {ep:>3d}] Finished. Top-1 Accuracy: {acc:.2f}% ---\n", flush=True)
+
+
 def main():
     p = argparse.ArgumentParser(description="SimCLR Batch Size & Training Time Sweep")
+    p.add_argument("--lr", type=float, default=BASE_CONFIG["lr"],
+                   help=f"Base LR for pre-training (default: {BASE_CONFIG['lr']})")
     p.add_argument("--data_root", type=str, default=BASE_CONFIG["data_root"])
     p.add_argument("--log_dir", type=str, default=BASE_CONFIG["log_dir"])
     p.add_argument("--eval_epochs", type=int, default=BASE_CONFIG["eval_epochs"])
@@ -108,6 +173,7 @@ def main():
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     train_script = str(_SIMCLR_DIR / "train.py")
+    save_epochs_str = [str(ep) for ep in MULTI_EPOCH_CHECKPOINTS]
 
     # -----------------------------------------------------------------------
     # Step 1: Pre-training Run: Batch Size 128 (100 epochs)
@@ -120,6 +186,7 @@ def main():
         sys.executable, train_script,
         "--batch_size=128",
         "--epochs=100",
+        f"--lr={args.lr}",
         "--aug_preset=full_aug",
         f"--temperature={BASE_CONFIG['temperature']}",
         f"--eval_epochs={args.eval_epochs}",
@@ -128,7 +195,6 @@ def main():
         f"--log_dir={args.log_dir}",
         f"--aug_backend={args.aug_backend}",
         f"--run_name={bs128_run_name}",
-        # In train.py, linear eval runs automatically at the end of training
     ]
     if args.offline:
         bs128_cmd.append("--offline")
@@ -156,6 +222,7 @@ def main():
         sys.executable, train_script,
         "--batch_size=256",
         "--epochs=100",
+        f"--lr={args.lr}",
         "--aug_preset=full_aug",
         f"--temperature={BASE_CONFIG['temperature']}",
         f"--eval_epochs={args.eval_epochs}",
@@ -182,16 +249,16 @@ def main():
 
     # -----------------------------------------------------------------------
     # Step 3: Pre-training Run: Batch Size 512 (200 epochs)
-    # Saves checkpoints at 100, 125, 150, 175, 200 epochs
+    # Saves checkpoints at 100, 150, 200 epochs
     # -----------------------------------------------------------------------
     bs512_run_name = "simclr_bs512"
     bs512_final_ckpt = ckpt_dir / f"{bs512_run_name}_final.pt"
-    save_epochs_str = [str(ep) for ep in BS512_SAVE_EPOCHS]
 
     bs512_cmd = [
         sys.executable, train_script,
         "--batch_size=512",
         "--epochs=200",
+        f"--lr={args.lr}",
         "--aug_preset=full_aug",
         f"--temperature={BASE_CONFIG['temperature']}",
         f"--eval_epochs={args.eval_epochs}",
@@ -201,7 +268,7 @@ def main():
         f"--aug_backend={args.aug_backend}",
         f"--run_name={bs512_run_name}",
         "--save_epochs", *save_epochs_str,
-        "--skip_eval",  # We will manually run linear eval on all 5 checkpoints below
+        "--skip_eval",
     ]
     if args.offline:
         bs512_cmd.append("--offline")
@@ -209,71 +276,50 @@ def main():
         bs512_cmd.append("--online")
 
     if not args.skip_pretrain:
-        # Check if 200 epoch checkpoint already exists
         if bs512_final_ckpt.exists() or (ckpt_dir / f"{bs512_run_name}_ep200.pt").exists():
             print(f"[{bs512_run_name}] 200 epochs already pre-trained. Skipping pre-training.")
         else:
             run_pretrain(bs512_cmd, bs512_run_name, log_dir, dry_run=args.dry_run)
 
+    # Evaluate BS 512 checkpoints: 100, 150, 200
+    evaluate_saved_checkpoints(bs512_run_name, MULTI_EPOCH_CHECKPOINTS, args, log_dir, ckpt_dir)
+
     # -----------------------------------------------------------------------
-    # Step 4: Linear Evaluation on all 5 checkpoints of Batch Size 512
-    # Checkpoints: 100, 125, 150, 175, 200 epochs
+    # Step 4: Pre-training Run: Batch Size 1024 (200 epochs)
+    # Saves checkpoints at 100, 150, 200 epochs
     # -----------------------------------------------------------------------
-    print("\n" + "=" * 65)
-    print("  Evaluating Batch Size 512 checkpoints (Training Time Sweep)")
-    print("=" * 65 + "\n")
+    bs1024_run_name = "simclr_bs1024"
+    bs1024_final_ckpt = ckpt_dir / f"{bs1024_run_name}_final.pt"
 
-    for ep in BS512_SAVE_EPOCHS:
-        ep_ckpt = ckpt_dir / f"{bs512_run_name}_ep{ep}.pt"
-        if not ep_ckpt.exists() and ep == 200 and bs512_final_ckpt.exists():
-            ep_ckpt = bs512_final_ckpt
+    bs1024_cmd = [
+        sys.executable, train_script,
+        "--batch_size=1024",
+        "--epochs=200",
+        f"--lr={args.lr}",
+        "--aug_preset=full_aug",
+        f"--temperature={BASE_CONFIG['temperature']}",
+        f"--eval_epochs={args.eval_epochs}",
+        f"--eval_lr={args.eval_lr}",
+        f"--data_root={args.data_root}",
+        f"--log_dir={args.log_dir}",
+        f"--aug_backend={args.aug_backend}",
+        f"--run_name={bs1024_run_name}",
+        "--save_epochs", *save_epochs_str,
+        "--skip_eval",
+    ]
+    if args.offline:
+        bs1024_cmd.append("--offline")
+    else:
+        bs1024_cmd.append("--online")
 
-        eval_file = log_dir / f"{bs512_run_name}_ep{ep}_eval.txt"
+    if not args.skip_pretrain:
+        if bs1024_final_ckpt.exists() or (ckpt_dir / f"{bs1024_run_name}_ep200.pt").exists():
+            print(f"[{bs1024_run_name}] 200 epochs already pre-trained. Skipping pre-training.")
+        else:
+            run_pretrain(bs1024_cmd, bs1024_run_name, log_dir, dry_run=args.dry_run)
 
-        if eval_file.exists():
-            acc = parse_eval_accuracy(eval_file)
-            print(f"  [Epoch {ep:>3d}] Already evaluated: Top-1 Acc = {acc:.2f}% ({eval_file.name})")
-            continue
-
-        if args.dry_run:
-            print(f"  [Epoch {ep:>3d}] Would evaluate checkpoint: {ep_ckpt.name} -> {eval_file.name}")
-            continue
-
-        if not ep_ckpt.exists():
-            print(f"  !! Checkpoint for epoch {ep} not found at {ep_ckpt}. Skipping.")
-            continue
-
-        print(f"\n--- Running Linear Eval: BS=512, Pretrained Epochs={ep} ---")
-        wb_run = None
-        if not args.offline:
-            import wandb
-            wb_run = wandb.init(
-                project="simclr-cifar10",
-                name=f"{bs512_run_name}_ep{ep}_eval",
-                mode="online",
-                config={
-                    "batch_size":      512,
-                    "pretrain_epochs": ep,
-                    "eval_epochs":     args.eval_epochs,
-                    "eval_lr":         args.eval_lr,
-                },
-                tags=["simclr", "training_time_sweep", f"ep{ep}"],
-            )
-
-        acc = eval_checkpoint(
-            ckpt_path=ep_ckpt,
-            data_root=args.data_root,
-            eval_epochs=args.eval_epochs,
-            eval_lr=args.eval_lr,
-            wandb_run=wb_run,
-            eval_file=eval_file,
-        )
-
-        if wb_run is not None:
-            wb_run.summary["linear_eval/final_top1_acc"] = acc
-            wb_run.finish()
-
-        print(f"--- [Epoch {ep:>3d}] Finished. Top-1 Accuracy: {acc:.2f}% ---\n", flush=True)
+    # Evaluate BS 1024 checkpoints: 100, 150, 200
+    evaluate_saved_checkpoints(bs1024_run_name, MULTI_EPOCH_CHECKPOINTS, args, log_dir, ckpt_dir)
 
     # -----------------------------------------------------------------------
     # Step 5: Print Summary Tables (Batch Size Sweep + Training Time Sweep)
@@ -285,8 +331,8 @@ def main():
     # Accuracy retrieval
     bs128_acc = parse_eval_accuracy(bs128_eval_file)
     bs256_acc = parse_eval_accuracy(bs256_eval_file)
-    bs512_ep100_eval_file = log_dir / f"{bs512_run_name}_ep100_eval.txt"
-    bs512_ep100_acc = parse_eval_accuracy(bs512_ep100_eval_file)
+    bs512_ep100_acc = parse_eval_accuracy(log_dir / f"{bs512_run_name}_ep100_eval.txt")
+    bs1024_ep100_acc = parse_eval_accuracy(log_dir / f"{bs1024_run_name}_ep100_eval.txt")
 
     summary_text = []
     summary_text.append("\n" + "=" * 65)
@@ -300,16 +346,21 @@ def main():
     summary_text.append(f"{128:>12} | {100:>16} | {f'{bs128_acc:.2f}%' if bs128_acc is not None else 'N/A':>15}")
     summary_text.append(f"{256:>12} | {100:>16} | {f'{bs256_acc:.2f}%' if bs256_acc is not None else 'N/A':>15}")
     summary_text.append(f"{512:>12} | {100:>16} | {f'{bs512_ep100_acc:.2f}%' if bs512_ep100_acc is not None else 'N/A':>15}")
+    summary_text.append(f"{1024:>12} | {100:>16} | {f'{bs1024_ep100_acc:.2f}%' if bs1024_ep100_acc is not None else 'N/A':>15}")
     summary_text.append("-" * 65)
 
-    summary_text.append("\n2. TRAINING TIME SWEEP (Batch Size 512 Across Epochs)")
+    summary_text.append("\n2. TRAINING TIME SWEEP (Pre-training Epochs vs Batch Sizes)")
     summary_text.append("-" * 65)
-    summary_text.append(f"{'Pretrain Epochs':>16} | {'Batch Size':>12} | {'Top-1 Accuracy':>15}")
+    summary_text.append(f"{'Pretrain Epochs':>16} | {'BS 512 Top-1':>16} | {'BS 1024 Top-1':>16}")
     summary_text.append("-" * 65)
-    for ep in BS512_SAVE_EPOCHS:
-        f = log_dir / f"{bs512_run_name}_ep{ep}_eval.txt"
-        acc = parse_eval_accuracy(f)
-        summary_text.append(f"{ep:>16} | {512:>12} | {f'{acc:.2f}%' if acc is not None else 'N/A':>15}")
+    for ep in MULTI_EPOCH_CHECKPOINTS:
+        f512 = log_dir / f"{bs512_run_name}_ep{ep}_eval.txt"
+        f1024 = log_dir / f"{bs1024_run_name}_ep{ep}_eval.txt"
+        a512 = parse_eval_accuracy(f512)
+        a1024 = parse_eval_accuracy(f1024)
+        s512 = f"{a512:.2f}%" if a512 is not None else "N/A"
+        s1024 = f"{a1024:.2f}%" if a1024 is not None else "N/A"
+        summary_text.append(f"{ep:>16} | {s512:>16} | {s1024:>16}")
     summary_text.append("-" * 65 + "\n")
 
     full_summary = "\n".join(summary_text)
@@ -336,18 +387,20 @@ def main():
             bs_table.add_data(256, 100, bs256_acc)
         if bs512_ep100_acc is not None:
             bs_table.add_data(512, 100, bs512_ep100_acc)
+        if bs1024_ep100_acc is not None:
+            bs_table.add_data(1024, 100, bs1024_ep100_acc)
         summary_run.log({"batch_size_sweep": bs_table})
 
-        time_table = wandb.Table(columns=["Pretrain Epochs", "Batch Size", "Top-1 Acc"])
-        for ep in BS512_SAVE_EPOCHS:
-            f = log_dir / f"{bs512_run_name}_ep{ep}_eval.txt"
-            a = parse_eval_accuracy(f)
-            if a is not None:
-                time_table.add_data(ep, 512, a)
+        time_table = wandb.Table(columns=["Pretrain Epochs", "BS 512 Top-1", "BS 1024 Top-1"])
+        for ep in MULTI_EPOCH_CHECKPOINTS:
+            f512 = log_dir / f"{bs512_run_name}_ep{ep}_eval.txt"
+            f1024 = log_dir / f"{bs1024_run_name}_ep{ep}_eval.txt"
+            a512 = parse_eval_accuracy(f512)
+            a1024 = parse_eval_accuracy(f1024)
+            time_table.add_data(ep, a512, a1024)
         summary_run.log({"training_time_sweep": time_table})
         summary_run.finish()
 
 
 if __name__ == "__main__":
     main()
-
