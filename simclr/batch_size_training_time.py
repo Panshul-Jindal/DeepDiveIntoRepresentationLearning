@@ -53,7 +53,7 @@ BASE_CONFIG = {
     "data_root":   "./data",
     "log_dir":     "./logs",
     "aug_backend": "auto",
-    "offline":     True,
+    "offline":     False,
 }
 
 MULTI_EPOCH_CHECKPOINTS = [100, 150, 200]
@@ -170,10 +170,10 @@ def main():
     p.add_argument("--eval_lr", type=float, default=BASE_CONFIG["eval_lr"])
     p.add_argument("--aug_backend", type=str, default=BASE_CONFIG["aug_backend"],
                    choices=["auto", "cpu", "gpu"])
-    p.add_argument("--offline", action="store_true", default=True,
-                   help="Run W&B in offline mode (default: True)")
+    p.add_argument("--offline", action="store_true", default=BASE_CONFIG["offline"],
+                   help="Run W&B in offline mode without network syncing")
     p.add_argument("--online", dest="offline", action="store_false",
-                   help="Run W&B in online mode")
+                   help="Run W&B in online mode (default: online)")
     p.add_argument("--dry_run", action="store_true",
                    help="Print plan without running")
     p.add_argument("--skip_pretrain", action="store_true",

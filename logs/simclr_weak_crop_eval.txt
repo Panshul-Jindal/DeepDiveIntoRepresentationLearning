@@ -1,0 +1,16 @@
+=================================================================
+  Linear Evaluation Summary
+=================================================================
+  Run name        : simclr_weak_crop
+  Aug preset      : weak_crop  (weak_crop)
+  Total params    : 12,483,648 (12.48M)
+    Backbone      : 11,168,832 (11.17M)
+    Projector     : 1,314,816 (1.31M)
+  Pretrain epochs : 100
+  Batch size      : 512
+  Temperature     : 0.5
+  Eval epochs     : 100
+  Eval LR         : 0.1
+
+  >>> Final Top-1 Accuracy: 72.62%
+=================================================================

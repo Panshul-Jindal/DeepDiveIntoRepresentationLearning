@@ -112,10 +112,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--wandb_project", type=str, default="simclr-cifar10")
     p.add_argument("--wandb_entity",  type=str, default=None)
     p.add_argument("--run_name",      type=str, default=None)
-    p.add_argument("--offline",       action="store_true", default=True,
-                   help="Run W&B in offline mode without network syncing (default: True)")
+    p.add_argument("--offline",       action="store_true", default=False,
+                   help="Run W&B in offline mode without network syncing")
     p.add_argument("--online",        dest="offline", action="store_false",
-                   help="Run W&B in online mode with live cloud sync")
+                   help="Run W&B in online mode with live cloud sync (default: online)")
 
     return p.parse_args()
 
