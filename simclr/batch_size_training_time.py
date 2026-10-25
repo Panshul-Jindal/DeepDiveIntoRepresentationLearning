@@ -1,25 +1,23 @@
 """
-SimCLR Batch Size Sweep & Training Time (Epochs) Sweep for CIFAR-10 (Scaled LR).
-
-New experiment: Preserves previous constant-LR experiment results and runs all
-models fresh using linear learning rate scaling per Chen et al. (2020).
+SimCLR Batch Size Sweep & Training Time (Epochs) Sweep (Base LR = 1.0).
 
 Experiments executed:
-  1. Batch Size 128:  Pre-train 100 epochs (LR = 1.00) -> Linear eval (100 ep)
-  2. Batch Size 256:  Pre-train 100 epochs (LR = 2.00) -> Linear eval (100 ep)
-  3. Batch Size 512:  Pre-train 200 epochs (LR = 4.00) -> Linear eval at epochs 100, 150, 200
-  4. Batch Size 1024: Pre-train 200 epochs (LR = 8.00) -> Linear eval at epochs 100, 150, 200
+  1. Batch Size 128:  Pre-train 100 epochs (LR = 0.50) -> Linear eval (100 ep)
+  2. Batch Size 256:  Pre-train 100 epochs (LR = 1.00) -> Linear eval (100 ep)
+  3. Batch Size 512:  Pre-train 200 epochs (LR = 2.00) -> Linear eval at epochs 100, 150, 200
+  4. Batch Size 1024: Pre-train 200 epochs (LR = 4.00) -> Linear eval at epochs 100, 150, 200
 
 Learning Rate Scaling:
-  Base LR = 2.0
+  Base LR = 1.0 (from paper's CIFAR-10 grid {0.5, 1.0, 1.5})
   Actual LR = Base LR * (Batch Size / 256.0)
-    - BS 128:  LR = 1.00
-    - BS 256:  LR = 2.00
-    - BS 512:  LR = 4.00
-    - BS 1024: LR = 8.00
+    - BS 128:  LR = 0.50
+    - BS 256:  LR = 1.00
+    - BS 512:  LR = 2.00
+    - BS 1024: LR = 4.00
 
 Run Names:
-  simclr_bs128_scaled, simclr_bs256_scaled, simclr_bs512_scaled, simclr_bs1024_scaled
+  sweep_base_lr_1.0_bs128, sweep_base_lr_1.0_bs256,
+  sweep_base_lr_1.0_bs512, sweep_base_lr_1.0_bs1024
 
 Usage:
     # Dry run: view planned commands and scaled LRs
@@ -44,7 +42,7 @@ if str(_SIMCLR_DIR) not in sys.path:
 
 
 BASE_CONFIG = {
-    "base_lr":     2.0,
+    "base_lr":     1.0,
     "temperature": 0.5,
     "eval_epochs": 100,
     "eval_lr":     0.1,
@@ -127,7 +125,6 @@ def evaluate_saved_checkpoints(
             continue
 
         print(f"\n--- Running Linear Eval: {run_name}, Pretrained Epochs={ep} ---")
-        from linear_eval import eval_checkpoint
         wb_run = None
         if not args.offline:
             import wandb
@@ -144,6 +141,7 @@ def evaluate_saved_checkpoints(
                 tags=["simclr", "training_time_sweep", f"ep{ep}"],
             )
 
+        from linear_eval import eval_checkpoint
         acc = eval_checkpoint(
             ckpt_path=ep_ckpt,
             data_root=args.data_root,
@@ -161,7 +159,7 @@ def evaluate_saved_checkpoints(
 
 
 def main():
-    p = argparse.ArgumentParser(description="SimCLR Batch Size & Training Time Sweep (Scaled LR)")
+    p = argparse.ArgumentParser(description="SimCLR Batch Size & Training Time Sweep (Base LR = 1.0)")
     p.add_argument("--base_lr", type=float, default=BASE_CONFIG["base_lr"],
                    help=f"Base LR for pre-training (scaled as base_lr * batch_size / 256, default: {BASE_CONFIG['base_lr']})")
     p.add_argument("--data_root", type=str, default=BASE_CONFIG["data_root"])
@@ -203,7 +201,7 @@ def main():
     # -----------------------------------------------------------------------
     # Step 1: Pre-training Run: Batch Size 128 (100 epochs)
     # -----------------------------------------------------------------------
-    bs128_run_name = "simclr_bs128_scaled"
+    bs128_run_name = "sweep_base_lr_1.0_bs128"
     bs128_ckpt = ckpt_dir / f"{bs128_run_name}_final.pt"
     bs128_eval_file = log_dir / f"{bs128_run_name}_eval.txt"
     bs128_lr = get_lr(128)
@@ -221,6 +219,7 @@ def main():
         f"--log_dir={args.log_dir}",
         f"--aug_backend={args.aug_backend}",
         f"--run_name={bs128_run_name}",
+        "--skip_eval",  # Pre-training only; linear eval is run once below via eval_checkpoint
     ]
     if args.offline:
         bs128_cmd.append("--offline")
@@ -246,7 +245,7 @@ def main():
     # -----------------------------------------------------------------------
     # Step 2: Pre-training Run: Batch Size 256 (100 epochs)
     # -----------------------------------------------------------------------
-    bs256_run_name = "simclr_bs256_scaled"
+    bs256_run_name = "sweep_base_lr_1.0_bs256"
     bs256_ckpt = ckpt_dir / f"{bs256_run_name}_final.pt"
     bs256_eval_file = log_dir / f"{bs256_run_name}_eval.txt"
     bs256_lr = get_lr(256)
@@ -264,6 +263,7 @@ def main():
         f"--log_dir={args.log_dir}",
         f"--aug_backend={args.aug_backend}",
         f"--run_name={bs256_run_name}",
+        "--skip_eval",  # Pre-training only; linear eval is run once below via eval_checkpoint
     ]
     if args.offline:
         bs256_cmd.append("--offline")
@@ -290,7 +290,7 @@ def main():
     # Step 3: Pre-training Run: Batch Size 512 (200 epochs)
     # Saves checkpoints at 100, 150, 200 epochs
     # -----------------------------------------------------------------------
-    bs512_run_name = "simclr_bs512_scaled"
+    bs512_run_name = "sweep_base_lr_1.0_bs512"
     bs512_final_ckpt = ckpt_dir / f"{bs512_run_name}_final.pt"
     bs512_lr = get_lr(512)
 
@@ -308,7 +308,7 @@ def main():
         f"--aug_backend={args.aug_backend}",
         f"--run_name={bs512_run_name}",
         "--save_epochs", *save_epochs_str,
-        "--skip_eval",
+        "--skip_eval",  # Pre-training only; evaluate_saved_checkpoints evaluates 100, 150, 200
     ]
     if args.offline:
         bs512_cmd.append("--offline")
@@ -328,7 +328,7 @@ def main():
     # Step 4: Pre-training Run: Batch Size 1024 (200 epochs)
     # Saves checkpoints at 100, 150, 200 epochs
     # -----------------------------------------------------------------------
-    bs1024_run_name = "simclr_bs1024_scaled"
+    bs1024_run_name = "sweep_base_lr_1.0_bs1024"
     bs1024_final_ckpt = ckpt_dir / f"{bs1024_run_name}_final.pt"
     bs1024_lr = get_lr(1024)
 
@@ -346,7 +346,7 @@ def main():
         f"--aug_backend={args.aug_backend}",
         f"--run_name={bs1024_run_name}",
         "--save_epochs", *save_epochs_str,
-        "--skip_eval",
+        "--skip_eval",  # Pre-training only; evaluate_saved_checkpoints evaluates 100, 150, 200
     ]
     if args.offline:
         bs1024_cmd.append("--offline")
@@ -408,7 +408,7 @@ def main():
     print(full_summary)
 
     # Save to distinct summary file
-    summary_file = log_dir / "batch_size_training_time_scaled_summary.txt"
+    summary_file = log_dir / "sweep_base_lr_1.0_summary.txt"
     summary_file.write_text(full_summary + "\n")
     print(f"Summary written to: {summary_file}")
 
@@ -417,9 +417,9 @@ def main():
         import wandb
         summary_run = wandb.init(
             project="simclr-cifar10",
-            name="simclr_batch_size_training_time_scaled_summary",
+            name="simclr_sweep_base_lr_1.0_summary",
             mode="online",
-            tags=["simclr", "scaled_lr_summary"],
+            tags=["simclr", "sweep_base_lr_1.0_summary"],
         )
         bs_table = wandb.Table(columns=["Batch Size", "Pretrain Epochs", "Scaled LR", "Top-1 Acc"])
         if bs128_acc is not None:
