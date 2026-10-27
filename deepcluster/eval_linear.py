@@ -210,7 +210,7 @@ def accuracy(output, target, topk=(1,)):
 
     res = []
     for k in topk:
-        correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+        correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
         res.append(correct_k.mul_(100.0 / batch_size))
     return res
 
@@ -233,19 +233,18 @@ def train(train_loader, model, reglog, criterion, optimizer, epoch):
         #adjust learning rate
         learning_rate_decay(optimizer, len(train_loader) * epoch + i, args.lr)
 
-        target = target.cuda(async=True)
-        input_var = torch.autograd.Variable(input.cuda())
-        target_var = torch.autograd.Variable(target)
+        target = target.cuda(non_blocking=True)
+        input_var = input.cuda(non_blocking=True)
         # compute output
 
         output = forward(input_var, model, reglog.conv)
         output = reglog(output)
-        loss = criterion(output, target_var)
+        loss = criterion(output, target)
         # measure accuracy and record loss
-        prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
-        losses.update(loss.data[0], input.size(0))
-        top1.update(prec1[0], input.size(0))
-        top5.update(prec5[0], input.size(0))
+        prec1, prec5 = accuracy(output.detach(), target, topk=(1, 5))
+        losses.update(loss.item(), input.size(0))
+        top1.update(prec1[0].item(), input.size(0))
+        top5.update(prec5[0].item(), input.size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -281,24 +280,26 @@ def validate(val_loader, model, reglog, criterion):
         if args.tencrops:
             bs, ncrops, c, h, w = input_tensor.size()
             input_tensor = input_tensor.view(-1, c, h, w)
-        target = target.cuda(async=True)
-        input_var = torch.autograd.Variable(input_tensor.cuda(), volatile=True)
-        target_var = torch.autograd.Variable(target, volatile=True)
+        target = target.cuda(non_blocking=True)
 
-        output = reglog(forward(input_var, model, reglog.conv))
+        with torch.no_grad():
+            input_var = input_tensor.cuda(non_blocking=True)
 
-        if args.tencrops:
-            output_central = output.view(bs, ncrops, -1)[: , ncrops / 2 - 1, :]
-            output = softmax(output)
-            output = torch.squeeze(output.view(bs, ncrops, -1).mean(1))
-        else:
-            output_central = output
+            output = reglog(forward(input_var, model, reglog.conv))
 
-        prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
-        top1.update(prec1[0], input_tensor.size(0))
-        top5.update(prec5[0], input_tensor.size(0))
-        loss = criterion(output_central, target_var)
-        losses.update(loss.data[0], input_tensor.size(0))
+            if args.tencrops:
+                output_central = output.view(bs, ncrops, -1)[:, ncrops // 2 - 1, :]
+                output = softmax(output)
+                output = torch.squeeze(output.view(bs, ncrops, -1).mean(1))
+            else:
+                output_central = output
+
+            prec1, prec5 = accuracy(output, target, topk=(1, 5))
+            loss = criterion(output_central, target)
+
+        top1.update(prec1[0].item(), input_tensor.size(0))
+        top5.update(prec5[0].item(), input_tensor.size(0))
+        losses.update(loss.item(), input_tensor.size(0))
 
         # measure elapsed time
         batch_time.update(time.time() - end)

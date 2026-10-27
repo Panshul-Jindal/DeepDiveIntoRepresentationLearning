@@ -57,7 +57,7 @@ def main():
     model.eval()
 
     def gradient_ascent(f):
-        print f,
+        print(f, end=' ')
         sys.stdout.flush()
         fname_out = '{0}/layer{1}-channel{2}.jpeg'.format(repo, args.conv, f)
 

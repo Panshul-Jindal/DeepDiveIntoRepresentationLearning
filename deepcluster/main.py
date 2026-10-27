@@ -98,7 +98,7 @@ def main(args):
             checkpoint = torch.load(args.resume)
             args.start_epoch = checkpoint['epoch']
             # remove top_layer parameters from checkpoint
-            for key in checkpoint['state_dict']:
+            for key in list(checkpoint['state_dict']):
                 if 'top_layer' in key:
                     del checkpoint['state_dict'][key]
             model.load_state_dict(checkpoint['state_dict'])
@@ -248,7 +248,7 @@ def train(loader, model, crit, opt, epoch):
             path = os.path.join(
                 args.exp,
                 'checkpoints',
-                'checkpoint_' + str(n / args.checkpoints) + '.pth.tar',
+                'checkpoint_' + str(n // args.checkpoints) + '.pth.tar',
             )
             if args.verbose:
                 print('Save checkpoint at: {0}'.format(path))
@@ -259,15 +259,14 @@ def train(loader, model, crit, opt, epoch):
                 'optimizer' : opt.state_dict()
             }, path)
 
-        target = target.cuda(async=True)
-        input_var = torch.autograd.Variable(input_tensor.cuda())
-        target_var = torch.autograd.Variable(target)
+        target = target.cuda(non_blocking=True)
+        input_var = input_tensor.cuda(non_blocking=True)
 
         output = model(input_var)
-        loss = crit(output, target_var)
+        loss = crit(output, target)
 
         # record loss
-        losses.update(loss.data[0], input_tensor.size(0))
+        losses.update(loss.item(), input_tensor.size(0))
 
         # compute gradient and do SGD step
         opt.zero_grad()
@@ -298,8 +297,9 @@ def compute_features(dataloader, model, N):
     model.eval()
     # discard the label information in the dataloader
     for i, (input_tensor, _) in enumerate(dataloader):
-        input_var = torch.autograd.Variable(input_tensor.cuda(), volatile=True)
-        aux = model(input_var).data.cpu().numpy()
+        with torch.no_grad():
+            input_var = input_tensor.cuda(non_blocking=True)
+            aux = model(input_var).cpu().numpy()
 
         if i == 0:
             features = np.zeros((N, aux.shape[1]), dtype='float32')

@@ -46,6 +46,7 @@ parser.add_argument('--wd', type=float, required=False, default=1e-6, help='weig
 parser.add_argument('--min_scale', type=float, required=False, default=0.1, help='scale')
 parser.add_argument('--max_scale', type=float, required=False, default=0.5, help='scale')
 parser.add_argument('--seed', type=int, default=31, help='random seed')
+parser.add_argument('--workers', type=int, default=8, help='number of data loading workers')
 
 def main():
     args = parser.parse_args()    
@@ -79,7 +80,7 @@ def main():
 
     loader = torch.utils.data.DataLoader(dataset,
          batch_size=16, shuffle=False,
-         num_workers=24, pin_memory=True)
+         num_workers=args.workers, pin_memory=True)
     print('PASCAL VOC 2007 ' + args.split + ' dataset loaded')
 
     # re initialize classifier
@@ -147,7 +148,7 @@ def main():
         train_dataset,
         batch_size=1,
         shuffle=False,
-        num_workers=24, 
+        num_workers=args.workers, 
         pin_memory=True,
     )
     evaluate(train_loader, model, args.eval_random_crops)
@@ -158,7 +159,7 @@ def main():
         test_dataset,
         batch_size=1,
         shuffle=False,
-        num_workers=24, 
+        num_workers=args.workers, 
         pin_memory=True,
     )
     evaluate(test_loader, model, args.eval_random_crops)

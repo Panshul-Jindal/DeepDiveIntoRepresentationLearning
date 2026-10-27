@@ -269,7 +269,7 @@ def rmac(features, rmac_levels, pca=None):
     nim, nc, xd, yd = features.size()
 
     rmac_regions = image_helper.get_rmac_region_coordinates(xd, yd, rmac_levels)
-    rmac_regions = rmac_regions.astype(np.int)
+    rmac_regions = rmac_regions.astype(int)
     nr = len(rmac_regions)
 
     rmac_descriptors = []
@@ -332,7 +332,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # Load the dataset and the image helper
-    print "Prepare the dataset from ", args.dataset
+    print("Prepare the dataset from ", args.dataset)
     dataset = Dataset(args.dataset, args.eval_binary)
 
     ensure_directory_exists(args.temp_dir + '/')

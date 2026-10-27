@@ -88,13 +88,31 @@ def preprocess_features(npdata, pca=256):
     mat = faiss.PCAMatrix (ndim, pca, eigen_power=-0.5)
     mat.train(npdata)
     assert mat.is_trained
-    npdata = mat.apply_py(npdata)
+    npdata = (mat.apply_py if hasattr(mat, 'apply_py') else mat.apply)(npdata)
 
     # L2 normalization
     row_sums = np.linalg.norm(npdata, axis=1)
     npdata = npdata / row_sums[:, np.newaxis]
 
     return npdata
+
+
+def make_index_flat_l2(d, device=0):
+    """Builds a faiss L2 index, on GPU if the faiss GPU build is installed."""
+    if not hasattr(faiss, 'StandardGpuResources'):
+        return faiss.IndexFlatL2(d)
+
+    res = faiss.StandardGpuResources()
+    flat_config = faiss.GpuIndexFlatConfig()
+    flat_config.useFloat16 = False
+    flat_config.device = device
+    index = faiss.GpuIndexFlatL2(res, d, flat_config)
+
+    # The C++ index only borrows res, so without a python reference it gets
+    # garbage collected out from under the index. Pinning it on the index is
+    # what faiss' own index_cpu_to_gpu wrappers do.
+    index.referenced_objects = res
+    return index
 
 
 def make_graph(xb, nnn):
@@ -108,13 +126,7 @@ def make_graph(xb, nnn):
     """
     N, dim = xb.shape
 
-    # we need only a StandardGpuResources per GPU
-    res = faiss.StandardGpuResources()
-
-    # L2
-    flat_config = faiss.GpuIndexFlatConfig()
-    flat_config.device = int(torch.cuda.device_count()) - 1
-    index = faiss.GpuIndexFlatL2(res, dim, flat_config)
+    index = make_index_flat_l2(dim, max(int(torch.cuda.device_count()) - 1, 0))
     index.add(xb)
     D, I = index.search(xb, nnn + 1)
     return I, D
@@ -163,15 +175,11 @@ def run_kmeans(x, nmb_clusters, verbose=False):
     # Change faiss seed at each k-means so that the randomly picked
     # initialization centroids do not correspond to the same feature ids
     # from an epoch to another.
-    clus.seed = np.random.randint(1234)
+    clus.seed = int(np.random.randint(1234))
 
     clus.niter = 20
     clus.max_points_per_centroid = 10000000
-    res = faiss.StandardGpuResources()
-    flat_config = faiss.GpuIndexFlatConfig()
-    flat_config.useFloat16 = False
-    flat_config.device = 0
-    index = faiss.GpuIndexFlatL2(res, d, flat_config)
+    index = make_index_flat_l2(d)
 
     # perform the training
     clus.train(x, index)

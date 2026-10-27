@@ -5,17 +5,25 @@
 # LICENSE file in the root directory of this source tree.
 #
 #!/bin/bash
+set -e
+cd "$(dirname "$0")"
 
-VOCDIR=""
-MODELROOT="${HOME}/deepcluster_models"
+# Override any of these from the environment, e.g.
+#   VOCDIR=/path/to/VOC2007 ./eval_voc_classif.sh
+VOCDIR="${VOCDIR:-../data/VOCdevkit/VOC2007}"
+MODELROOT="${MODELROOT:-./deepcluster_models}"
 MODEL="${MODELROOT}/alexnet/checkpoint.pth.tar"
+WORKERS="${WORKERS:-8}"
+NIT="${NIT:-80000}"
 
-PYTHON="${HOME}/test/conda/bin/python"
+PYTHON="../.venv/bin/python"
 
 # with training the batch norm
 # 72.0 mAP
-$PYTHON eval_voc_classif.py --vocdir $VOCDIR --model $MODEL --split trainval --fc6_8 1 --train_batchnorm 1
+$PYTHON eval_voc_classif.py --vocdir "$VOCDIR" --model "$MODEL" --split trainval \
+  --fc6_8 1 --train_batchnorm 1 --workers "$WORKERS" --nit "$NIT"
 
 # without training the batch norm
 # 70.4 mAP
-$PYTHON eval_voc_classif.py --vocdir $VOCDIR --model $MODEL --split trainval --fc6_8 1 --train_batchnorm 0
+$PYTHON eval_voc_classif.py --vocdir "$VOCDIR" --model "$MODEL" --split trainval \
+  --fc6_8 1 --train_batchnorm 0 --workers "$WORKERS" --nit "$NIT"

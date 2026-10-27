@@ -61,8 +61,9 @@ def main(args):
     # keys are filters and value are arrays with activation scores for the whole dataset
     layers_activations = {}
     for i, (input_tensor, _) in enumerate(dataloader):
-        input_var = torch.autograd.Variable(input_tensor.cuda(), volatile=True)
-        activations = forward(model, args.conv, input_var)
+        with torch.no_grad():
+            input_var = input_tensor.cuda(non_blocking=True)
+            activations = forward(model, args.conv, input_var)
 
         if i == 0:
             layers_activations = {filt: np.zeros(len(dataset)) for filt in activations}
